@@ -1,0 +1,2 @@
+# MA-NCA
+This repository contains all of the code, GitHub Actions workflows, IaC configuration and other files related to my main semester infrastructure that make sense to be structured in a git repository.
