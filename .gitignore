@@ -1,1 +1,6 @@
 innovatech/lab/terraform.tfvars
+
+innovatech/lab/.terraform
+
+*.tfstate
+*.tfstate.*
