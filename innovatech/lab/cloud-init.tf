@@ -1,5 +1,24 @@
 # Control Plane Cloud-Init Snippet
+resource "null_resource" "proxmox_snippets_dir" { # make sure the /var/lib/vz/snippets actually exists on the host
+  connection {
+    type  = "ssh"
+    host  = "192.168.106.9"
+    user  = "root"
+    agent = true
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "mkdir -p /var/lib/vz/snippets",
+      "pvesm set local --content backup,import,iso,vztmpl,snippets"
+
+    ]
+  }
+} 
+
 resource "proxmox_virtual_environment_file" "k8s_control_plane_config" {
+  depends_on = [null_resource.proxmox_snippets_dir]
+  
   content_type = "snippets"
   datastore_id = "local"
   node_name    = "pve"
@@ -55,6 +74,8 @@ resource "proxmox_virtual_environment_file" "k8s_control_plane_config" {
 
 # Worker Node Cloud-Init Snippet
 resource "proxmox_virtual_environment_file" "k8s_worker_config" {
+  depends_on = [null_resource.proxmox_snippets_dir]
+  
   content_type = "snippets"
   datastore_id = "local"
   node_name    = "pve"

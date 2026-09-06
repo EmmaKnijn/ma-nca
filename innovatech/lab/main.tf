@@ -35,6 +35,77 @@ locals {
   }
 }
 
+# Pull the Debian 13 (trixie) cloud image into Proxmox storage.
+# Pinned to the specific dated snapshot (not "latest") to keep the build reproducible.
+resource "proxmox_virtual_environment_download_file" "debian13_cloud_image" {
+  content_type = "iso"
+  datastore_id = "local"
+  node_name    = "pve"
+  url          = "https://cloud.debian.org/images/cloud/trixie/20250806-2196/debian-13-genericcloud-amd64-20250806-2196.qcow2"
+  file_name    = "debian-13-genericcloud-amd64-20250806-2196.img" # renamed so Proxmox accepts it under the iso content type
+  overwrite    = false
+}
+
+resource "proxmox_virtual_environment_vm" "debian13_template" {
+  name      = "debian-13-cloudinit-template"
+  node_name = "pve"
+  vm_id     = 9000
+  template  = true
+  started   = false # templates should never boot themselves
+
+  cpu {
+    cores = 2
+    type  = "host"
+  }
+
+  memory {
+    dedicated = 2048
+  }
+
+  network_device {
+    bridge = "vmbr0"
+  }
+
+  disk {
+    datastore_id = "local-lvm"
+    file_id      = proxmox_virtual_environment_download_file.debian13_cloud_image.id
+    interface    = "scsi0"
+    iothread     = true
+    discard      = "on"
+    size         = 20 # matches the disk size in k8s cluster clones
+    file_format  = "raw"
+  }
+
+  # Required for Debian/Ubuntu cloud images: without a serial console configured,
+  # they kernel-panic when the boot disk is resized on clone.
+  serial_device {}
+
+  scsi_hardware = "virtio-scsi-single"
+
+  initialization {
+    datastore_id = "local-lvm" # where the cloud-init drive itself is stored
+    ip_config {
+      ipv4 {
+        address = "dhcp" # irrelevant on the template the clones override this
+      }
+    }
+  }
+
+  agent {
+    enabled = true
+  }
+
+  operating_system {
+    type = "l26"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      network_device, # avoid template drift once clones exist
+    ]
+  }
+}
+
 resource "proxmox_virtual_environment_vm" "k8s_cluster" {
   for_each  = local.k8s_nodes
 
@@ -42,7 +113,7 @@ resource "proxmox_virtual_environment_vm" "k8s_cluster" {
   node_name = "pve"
 
   clone {
-    vm_id = 9000
+    vm_id = proxmox_virtual_environment_vm.debian13_template.vm_id
     full  = true
   }
 
@@ -59,6 +130,7 @@ resource "proxmox_virtual_environment_vm" "k8s_cluster" {
   disk {
     datastore_id = "local-lvm"
     interface    = "scsi0"
+    file_id      = proxmox_virtual_environment_download_file.debian13_cloud_image.id
     size         = 20 # only 20gb as i dont have a ton of storage available on my proxmox host, but this can be increased as needed
     iothread     = true
     file_format  = "raw"
