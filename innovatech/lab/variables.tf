@@ -8,3 +8,15 @@ variable "pm_api_token" {
   description = "Proxmox API Token (Format: user@realm!token_id=00000000-0000-0000-0000-000000000000)"
   sensitive   = true
 }
+
+variable "vm_user_password" {
+  description = "Password for the VM user"
+  type        = string
+  sensitive   = true
+}
+
+variable "vm_user_ssh_key" {
+  description = "SSH key for the VM user"
+  type        = string
+  sensitive   = true
+}

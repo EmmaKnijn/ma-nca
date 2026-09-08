@@ -12,7 +12,7 @@ resource "random_string" "token_secret" {
 }
 
 locals {
-  control_plane_ip = "192.168.106.11"
+  control_plane_ip = "192.168.106.201"
   k8s_token        = "${random_string.token_id.result}.${random_string.token_secret.result}"
   k8s_version      = "v1.31" 
 
@@ -24,12 +24,12 @@ locals {
     }
     "node2" = {
       name = "ehv2-prod-k8s-0002"
-      ip   = "192.168.106.12"
+      ip   = "192.168.106.202"
       role = "worker"
     }
     "node3" = {
       name = "ehv2-prod-k8s-0003"
-      ip   = "192.168.106.13"
+      ip   = "192.168.106.203"
       role = "worker"
     }
   }
@@ -145,6 +145,7 @@ resource "proxmox_virtual_environment_vm" "k8s_cluster" {
 
   agent {
     enabled = true
+    timeout = "10s"
   }
 
   initialization {
@@ -158,7 +159,7 @@ resource "proxmox_virtual_environment_vm" "k8s_cluster" {
     dns {
       servers = ["1.1.1.1", "8.8.8.8"]
     }
-
-    user_data_file_id = each.value.role == "control-plane" ? proxmox_virtual_environment_file.k8s_control_plane_config.id : proxmox_virtual_environment_file.k8s_worker_config.id
+    
+  user_data_file_id = proxmox_virtual_environment_file.k8s_node_config[each.key].id
   }
 }

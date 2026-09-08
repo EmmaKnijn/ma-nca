@@ -1,1 +1,1 @@
-ansible-playbook -i inventory/hosts.yml site.yml -e "k8s_token=$(terraform output -raw k8s_token)"
+ansible-playbook -i inventory/hosts.yml site.yml -e "k8s_token=$(cd ../lab && terraform output -raw k8s_token)"

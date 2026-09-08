@@ -4,3 +4,5 @@ innovatech/lab/.terraform
 
 *.tfstate
 *.tfstate.*
+
+innovatech/ansible/kubeconfig

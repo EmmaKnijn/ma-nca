@@ -1,5 +1,118 @@
 ---
-- name: Initialize Kubernetes control plane
+# ==============================================================================
+# Play 1: Common Node Preparation (All Nodes)
+# Sets up kernel modules, sysctl, containerd CNI paths, storage packages, and Kube binaries
+# ==============================================================================
+- name: Prepare all cluster nodes
+  hosts: all
+  become: true
+  tasks:
+    - name: Load required kernel modules for Kubernetes & Containerd
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Persist kernel modules across reboots
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    - name: Configure sysctl parameters for Kubernetes networking
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: Fix containerd CNI directory paths in config.toml
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backrefs: true
+      loop:
+        - { regexp: '^(\s*)bin_dir\s*=.*', line: '\1bin_dir = "/opt/cni/bin"' }
+        - { regexp: '^(\s*)conf_dir\s*=.*', line: '\1conf_dir = "/etc/cni/net.d"' }
+      notify: Restart containerd
+
+    - name: Install Longhorn node prerequisites
+      ansible.builtin.apt:
+        name:
+          - open-iscsi
+          - nfs-common
+          - curl
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Ensure iscsid service is enabled and active
+      ansible.builtin.systemd:
+        name: iscsid
+        enabled: true
+        state: started
+
+    - name: Ensure keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Kubernetes repository signing key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        mode: "0644"
+
+    - name: Configure Kubernetes apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.sources
+        content: |
+          Types: deb
+          URIs: https://pkgs.k8s.io/core:/stable:/v1.37/deb/
+          Suites: /
+          Signed-By: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          Trusted: yes
+        mode: "0644"
+
+    - name: Install Kubernetes components
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+
+    - name: Hold Kubernetes packages at current version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+
+# ==============================================================================
+# Play 2: Initialize Control Plane & CNI
+# ==============================================================================
+- name: Initialize Kubernetes Control Plane
   hosts: control_plane
   become: true
   vars:
@@ -16,28 +129,30 @@
       args:
         creates: /etc/kubernetes/admin.conf
 
-    - name: Set up kubeconfig for the connecting user
+    - name: Create local user .kube directory
       ansible.builtin.file:
         path: "/home/{{ ansible_user }}/.kube"
         state: directory
         owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
         mode: "0755"
 
-    - name: Copy admin.conf into place
+    - name: Copy admin.conf to local user kubeconfig
       ansible.builtin.copy:
         src: /etc/kubernetes/admin.conf
         dest: "/home/{{ ansible_user }}/.kube/config"
         remote_src: true
         owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
         mode: "0600"
 
-    - name: Fetch kubeconfig locally for your own kubectl
+    - name: Fetch kubeconfig to local management host
       ansible.builtin.fetch:
         src: /etc/kubernetes/admin.conf
         dest: "./kubeconfig"
         flat: true
 
-    - name: Compute CA cert hash for worker join
+    - name: Compute discovery CA certificate hash
       ansible.builtin.shell: >
         openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt |
         openssl rsa -pubin -outform der 2>/dev/null |
@@ -45,18 +160,18 @@
       register: ca_cert_hash
       changed_when: false
 
-    - name: Expose hash to the workers play
+    - name: Expose CA hash as fact across plays
       ansible.builtin.set_fact:
         discovery_ca_hash: "{{ ca_cert_hash.stdout }}"
 
-    - name: Install Calico (operator)
+    - name: Install Calico Tigera Operator
       ansible.builtin.command:
         cmd: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml --kubeconfig=/etc/kubernetes/admin.conf
       register: calico_operator
       failed_when: calico_operator.rc != 0 and 'already exists' not in calico_operator.stderr
       changed_when: "'created' in calico_operator.stdout"
 
-    - name: Configure Calico pod CIDR via Installation CR
+    - name: Template Calico Installation Custom Resource
       ansible.builtin.copy:
         dest: /tmp/calico-installation.yaml
         content: |
@@ -69,20 +184,25 @@
               ipPools:
               - cidr: {{ pod_network_cidr }}
                 encapsulation: VXLANCrossSubnet
+        mode: "0644"
 
     - name: Apply Calico Installation CR
       ansible.builtin.command:
         cmd: kubectl apply -f /tmp/calico-installation.yaml --kubeconfig=/etc/kubernetes/admin.conf
-      changed_when: true
+      register: calico_apply
+      changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
 
-- name: Join worker nodes to cluster
+# ==============================================================================
+# Play 3: Join Worker Nodes
+# ==============================================================================
+- name: Join Worker Nodes to Cluster
   hosts: workers
   become: true
   vars:
     control_plane_ip: "{{ hostvars[groups['control_plane'][0]]['ansible_host'] }}"
     join_hash: "{{ hostvars[groups['control_plane'][0]]['discovery_ca_hash'] }}"
   tasks:
-    - name: Run kubeadm join
+    - name: Execute kubeadm join
       ansible.builtin.command:
         cmd: >
           kubeadm join {{ control_plane_ip }}:6443
@@ -90,3 +210,76 @@
           --discovery-token-ca-cert-hash=sha256:{{ join_hash }}
       args:
         creates: /etc/kubernetes/kubelet.conf
+
+# ==============================================================================
+# Play 4: Deploy & Configure Longhorn
+# ==============================================================================
+- name: Install and Configure Longhorn Distributed Storage
+  hosts: control_plane
+  become: true
+  vars:
+    longhorn_version: "v1.12.1"
+  tasks:
+    - name: Untaint control-plane node (enable workload & storage scheduling)
+      ansible.builtin.command:
+        cmd: kubectl taint nodes --all node-role.kubernetes.io/control-plane- --kubeconfig=/etc/kubernetes/admin.conf
+      register: taint_result
+      failed_when: taint_result.rc != 0 and 'not found' not in taint_result.stderr
+      changed_when: "'untainted' in taint_result.stdout"
+
+    - name: Deploy Longhorn manifests
+      ansible.builtin.command:
+        cmd: >
+          kubectl apply
+          -f https://raw.githubusercontent.com/longhorn/longhorn/{{ longhorn_version }}/deploy/longhorn.yaml
+          --kubeconfig=/etc/kubernetes/admin.conf
+      register: longhorn_install
+      changed_when: "'created' in longhorn_install.stdout or 'configured' in longhorn_install.stdout"
+
+    - name: Await rollout of Longhorn Manager DaemonSet
+      ansible.builtin.command:
+        cmd: kubectl rollout status daemonset/longhorn-manager -n longhorn-system --timeout=300s --kubeconfig=/etc/kubernetes/admin.conf
+      changed_when: false
+
+    - name: Remove default flag from stock Longhorn StorageClass
+      ansible.builtin.command:
+        cmd: >
+          kubectl annotate storageclass longhorn
+          storageclass.kubernetes.io/is-default-class="false"
+          --overwrite
+          --kubeconfig=/etc/kubernetes/admin.conf
+      changed_when: true
+
+    - name: Template custom default Longhorn StorageClass
+      ansible.builtin.copy:
+        dest: /tmp/longhorn-retain-sc.yaml
+        content: |
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: longhorn-retain
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          provisioner: driver.longhorn.io
+          allowVolumeExpansion: true
+          reclaimPolicy: Retain
+          volumeBindingMode: Immediate
+          parameters:
+            numberOfReplicas: "3"
+            staleReplicaTimeout: "30"
+            fromBackup: ""
+        mode: "0644"
+
+    - name: Deploy custom default Longhorn StorageClass
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/longhorn-retain-sc.yaml --kubeconfig=/etc/kubernetes/admin.conf
+      register: deploy_custom_sc
+      changed_when: "'created' in deploy_custom_sc.stdout or 'configured' in deploy_custom_sc.stdout"
+
+    - name: Install nginx ingress controller
+      ansible.builtin.command:
+        cmd: >
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.0/deploy/static/provider/baremetal/deploy.yaml
+          --kubeconfig=/etc/kubernetes/admin.conf
+      register: ingress_install
+      changed_when: "'created' in ingress_install.stdout or 'configured' in ingress_install.stdout"
