@@ -136,6 +136,14 @@ resource "proxmox_virtual_environment_vm" "k8s_cluster" {
     file_format  = "raw"
   }
 
+  disk {
+    datastore_id = "iscsi-lvm"
+    interface    = "scsi1"
+    size         = 100 # simulates the persistent volume storage for the k8s cluster, but this can be increased as needed
+    iothread     = true
+    file_format  = "raw"
+  }
+
   network_device {
     bridge   = "vmbr0"
     model    = "virtio"

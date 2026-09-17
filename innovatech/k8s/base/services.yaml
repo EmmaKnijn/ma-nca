@@ -4,7 +4,7 @@ metadata:
   name: postgres
   namespace: production
 spec:
-  clusterIP: None  # Headless service for StatefulSet
+  type: ClusterIP
   ports:
     - port: 5432
       targetPort: 5432

@@ -5,4 +5,6 @@ innovatech/lab/.terraform
 *.tfstate
 *.tfstate.*
 
-innovatech/ansible/kubeconfig
+kubeconfig
+grafana-deployment-secret.yaml
+postgres-deployment-secret.yaml

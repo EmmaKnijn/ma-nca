@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grafana-db-init
+  namespace: production
+spec:
+  # Safe to re-apply: the script only creates the database if it doesn't
+  # already exist, so reruns are a no-op once "grafana" is present.
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: create-grafana-db
+          image: postgres:16-alpine
+          env:
+            - name: PGHOST
+              value: "postgres.production.svc.cluster.local"
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: "postgres"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: password
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              EXISTS=$(psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'grafana'")
+              if [ "$EXISTS" = "1" ]; then
+                echo "Database 'grafana' already exists, nothing to do."
+              else
+                echo "Creating database 'grafana'..."
+                psql -c "CREATE DATABASE grafana;"
+              fi

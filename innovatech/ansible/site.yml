@@ -241,6 +241,15 @@
         cmd: kubectl rollout status daemonset/longhorn-manager -n longhorn-system --timeout=300s --kubeconfig=/etc/kubernetes/admin.conf
       changed_when: false
 
+    - name: Wait for default Longhorn StorageClass to be created
+      ansible.builtin.command:
+        cmd: kubectl get storageclass longhorn --kubeconfig=/etc/kubernetes/admin.conf
+      register: sc_check
+      retries: 20
+      delay: 5
+      until: sc_check.rc == 0
+      changed_when: false
+
     - name: Remove default flag from stock Longhorn StorageClass
       ansible.builtin.command:
         cmd: >
@@ -283,3 +292,139 @@
           --kubeconfig=/etc/kubernetes/admin.conf
       register: ingress_install
       changed_when: "'created' in ingress_install.stdout or 'configured' in ingress_install.stdout"
+
+### ==============================================================================
+### Play 5: Node Storage Preparation (All Nodes)
+### Prepares secondary physical disks for Longhorn distributed storage pool
+### ==============================================================================
+- name: Prepare secondary storage disks for Longhorn
+  hosts: all
+  become: true
+  vars:
+    expected_disk_size_gib: 100
+    disk_size_tolerance_gib: 10
+    mount_point: "/mnt/longhorn-storage"
+    filesystem_type: "ext4"
+  tasks:
+    - name: Ensure disk management utilities are installed
+      ansible.builtin.apt:
+        name:
+          - parted
+          - e2fsprogs
+        state: present
+
+    - name: Gather block device info
+      ansible.builtin.command:
+        cmd: lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT
+      register: lsblk_raw
+      changed_when: false
+
+    - name: Parse block devices
+      ansible.builtin.set_fact:
+        block_devices: "{{ (lsblk_raw.stdout | from_json).blockdevices }}"
+  
+    - name: Identify the correct storage disk by size and unmounted state
+      ansible.builtin.set_fact:
+        candidate_disks: "{{ candidate_disks_tmp }}"
+      vars:
+        candidate_disks_tmp: >-
+          {%- set results = [] -%}
+          {%- for dev in block_devices -%}
+            {%- if dev.type == 'disk' and dev.mountpoint is none
+                  and (dev.size | int) >= ((expected_disk_size_gib - disk_size_tolerance_gib) * 1073741824)
+                  and (dev.size | int) <= ((expected_disk_size_gib + disk_size_tolerance_gib) * 1073741824) -%}
+              {%- set _ = results.append(dev) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ results }}
+      failed_when: candidate_disks | length != 1
+
+    - name: Set storage_disk fact from discovered device
+      ansible.builtin.set_fact:
+        storage_disk: "/dev/{{ candidate_disks[0].name }}"
+
+    - name: Set storage_disk fact from discovered device
+      ansible.builtin.set_fact:
+        storage_disk: "/dev/{{ candidate_disks[0].name }}"
+
+    - name: Create ext4 filesystem directly on secondary disk
+      community.general.filesystem:
+        fstype: "{{ filesystem_type }}"
+        dev: "{{ storage_disk }}"
+        force: false
+
+    - name: Ensure Longhorn storage mount directory exists
+      ansible.builtin.file:
+        path: "{{ mount_point }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Mount disk and persist in /etc/fstab
+      ansible.posix.mount:
+        path: "{{ mount_point }}"
+        src: "{{ storage_disk }}"
+        fstype: "{{ filesystem_type }}"
+        opts: defaults,noatime
+        state: mounted
+
+
+### ==============================================================================
+### Play 6: Declarative Longhorn Node Storage Allocation
+### Registers /mnt/longhorn-storage and disables OS root drive scheduling
+### ==============================================================================
+- name: Configure Longhorn storage paths
+  hosts: control_plane
+  become: true
+  tags: longhorn-disks
+ 
+  vars:
+    mount_point: "/mnt/longhorn-storage"
+    extra_disk_key: "extra-disk"
+    cluster_nodes:
+      - ehv2-prod-k8s-0001
+      - ehv2-prod-k8s-0002
+      - ehv2-prod-k8s-0003
+  tasks:
+    - name: Ensure jq is installed
+      ansible.builtin.apt:
+        name: jq
+        state: present
+ 
+    # NOTE: previously this filter selected disks by `.path ==
+    # "{{ mount_point }}"` to disable the OS root disk's scheduling. Because
+    # the new "extra-disk" entry is added to the *same* document earlier in
+    # the pipe, and it uses that same mount_point as its path, the select()
+    # matched the disk we had just enabled and immediately disabled it again
+    # -- leaving zero schedulable disks and causing PVCs (e.g. Postgres) to
+    # get stuck in ContainerCreating. Fixed by keying off the disk's map key
+    # instead of its path, so only the pre-existing default disk (whatever
+    # its path) gets scheduling disabled, and "extra-disk" is left alone.
+    - name: Register extra disk and disable scheduling on all other disks
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          kubectl get nodes.longhorn.io {{ item }} -n longhorn-system -o json --kubeconfig=/etc/kubernetes/admin.conf | jq '
+            .spec.disks["{{ extra_disk_key }}"] = {
+              "allowScheduling": true,
+              "evictionRequested": false,
+              "path": "{{ mount_point }}",
+              "storageReserved": 0,
+              "tags": []
+            } |
+            .spec.disks |= (to_entries
+              | map(if .key != "{{ extra_disk_key }}"
+                    then .value.allowScheduling = false
+                    else . end)
+              | from_entries)
+          ' | kubectl apply -f - --kubeconfig=/etc/kubernetes/admin.conf
+        executable: /bin/bash
+      loop: "{{ cluster_nodes }}"
+ 
+    - name: Fetch kubeconfig to local management host
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "./kubeconfig"
+        flat: true
+ 

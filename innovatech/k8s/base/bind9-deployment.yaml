@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bind9-config
+  namespace: production
+data:
+  named.conf: |
+    options {
+      directory "/var/cache/bind";
+      
+      recursion yes;
+      allow-query { any; };
+      allow-recursion { any; };
+      allow-query-cache { any; };
+
+      forwarders {
+        1.1.1.1;
+        8.8.8.8;
+      };
+
+      dnssec-validation auto;
+      validate-except { "innovatech.arpa"; };
+
+      listen-on { any; };
+      listen-on-v6 { any; };
+    };
+
+    logging {
+      channel custom_stderr {
+        stderr;
+        severity info;
+        print-time yes;
+        print-category yes;
+        print-severity yes;
+      };
+      category default { custom_stderr; };
+      category queries { custom_stderr; };
+      category general { custom_stderr; };
+    };
+
+    zone "innovatech.arpa" {
+      type master;
+      file "/etc/bind/zones/db.innovatech.arpa";
+      notify no;
+    };
+
+  db.innovatech.arpa: |
+    $TTL    604800
+    @       IN      SOA     ns1.innovatech.arpa. admin.innovatech.arpa. (
+                              2026091004 ; Serial
+                                  604800 ; Refresh
+                                   86400 ; Retry
+                                 2419200 ; Expire
+                                  604800 ) ; Negative Cache TTL
+    ; Name Servers
+    @       IN      NS      ns1.innovatech.arpa.
+    ns1     IN      A       192.168.106.201
+
+    ; Bare domain (Round-robin across all 3 nodes)
+    @       IN      A       192.168.106.201
+    @       IN      A       192.168.106.202
+    @       IN      A       192.168.106.203
+
+    ; Services
+    grafana          IN  A   192.168.106.201
+    grafana          IN  A   192.168.106.202
+    grafana          IN  A   192.168.106.203
+
+    victoriametrics  IN  A   192.168.106.201
+    victoriametrics  IN  A   192.168.106.202
+    victoriametrics  IN  A   192.168.106.203
+
+    chat             IN  A   192.168.106.201
+    chat             IN  A   192.168.106.202
+    chat             IN  A   192.168.106.203
+
+    ; Subdomain Wildcard
+    *       IN      A       192.168.106.201
+    *       IN      A       192.168.106.202
+    *       IN      A       192.168.106.203
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bind9-dns
+  namespace: production
+  labels:
+    app: bind9-dns
+spec:
+  replicas: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bind9-dns
+  template:
+    metadata:
+      labels:
+        app: bind9-dns
+    spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: bind9-dns
+      #nodeSelector:
+      #  kubernetes.io/hostname: ehv2-prod-k8s-0001
+      containers:
+        - name: bind9
+          image: internetsystemsconsortium/bind9:9.18
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              hostPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              hostPort: 53
+              protocol: TCP
+          volumeMounts:
+            - name: named-conf
+              mountPath: /etc/bind/named.conf
+              subPath: named.conf
+            - name: zone-file
+              mountPath: /etc/bind/zones/db.innovatech.arpa
+              subPath: db.innovatech.arpa
+      volumes:
+        - name: named-conf
+          configMap:
+            name: bind9-config
+            items:
+              - key: named.conf
+                path: named.conf
+        - name: zone-file
+          configMap:
+            name: bind9-config
+            items:
+              - key: db.innovatech.arpa
+                path: db.innovatech.arpa
