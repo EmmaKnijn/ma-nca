@@ -4,6 +4,51 @@ metadata:
   name: monitoring
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: victoriametrics-scrape-config
+  namespace: monitoring
+data:
+  scrape.yml: |
+    global:
+      scrape_interval: 15s
+      scrape_timeout: 10s
+
+    scrape_configs:
+      # VictoriaMetrics scraping itself
+      - job_name: victoriametrics
+        static_configs:
+          - targets: ["localhost:8428"]
+
+      # node_exporter DaemonSet, one target per bare-metal node
+      # (hostNetwork means each pod binds directly to its node's IP)
+      - job_name: node
+        static_configs:
+          - targets:
+              - "192.168.106.201:9100"
+              - "192.168.106.202:9100"
+              - "192.168.106.203:9100"
+            labels:
+              cluster: innovatech
+
+      # Grafana's own /metrics endpoint
+      - job_name: grafana
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["grafana.monitoring.svc.cluster.local:3000"]
+
+      # nginx-ingress controller, one target per node (hostNetwork DaemonSet,
+      # same pattern as node_exporter)
+      - job_name: nginx-ingress
+        static_configs:
+          - targets:
+              - "192.168.106.201:10254"
+              - "192.168.106.202:10254"
+              - "192.168.106.203:10254"
+            labels:
+              cluster: innovatech
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: victoriametrics
@@ -44,9 +89,27 @@ spec:
             - -storageDataPath=/storage
             - -retentionPeriod=30d
             - -httpListenAddr=:8428
+            - -promscrape.config=/etc/victoriametrics/scrape.yml
+            # Re-reads the mounted file on this interval, so a `kubectl
+            # apply` on the ConfigMap alone (no pod restart) picks up new
+            # or changed scrape targets within ~1 minute (ConfigMap
+            # propagation) + this interval.
+            - -promscrape.configCheckInterval=30s
           ports:
             - name: http
               containerPort: 8428
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 15
+            periodSeconds: 20
           resources:
             requests:
               cpu: 150m
@@ -57,6 +120,13 @@ spec:
           volumeMounts:
             - name: vm-data
               mountPath: /storage
+            - name: scrape-config
+              mountPath: /etc/victoriametrics
+              readOnly: true
+      volumes:
+        - name: scrape-config
+          configMap:
+            name: victoriametrics-scrape-config
   volumeClaimTemplates:
     - metadata:
         name: vm-data
