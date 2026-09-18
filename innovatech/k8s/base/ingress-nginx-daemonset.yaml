@@ -32,6 +32,7 @@ spec:
             - --validating-webhook=:8443
             - --validating-webhook-certificate=/usr/local/certificates/cert
             - --validating-webhook-key=/usr/local/certificates/key
+            - --enable-metrics=true
           securityContext:
             capabilities:
               drop:
@@ -60,6 +61,9 @@ spec:
               protocol: TCP
             - name: webhook
               containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 10254
               protocol: TCP
           livenessProbe:
             httpGet:
