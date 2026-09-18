@@ -20,9 +20,22 @@ spec:
       labels:
         app: web
     spec:
+      # Only needed while the GHCR package is private. Create it once with:
+      #   kubectl create secret docker-registry ghcr-pull-secret \
+      #     --docker-server=ghcr.io \
+      #     --docker-username=<github-username> \
+      #     --docker-password=<PAT with read:packages scope> \
+      #     -n production
+      imagePullSecrets:
+        - name: ghcr-pull-secret
       containers:
         - name: nginx
-          image: nginx:alpine
+          # Placeholder — replace with your built image, e.g.
+          # ghcr.io/<github-org-or-user>/<repo>:<tag>. Prefer a pinned tag
+          # (a commit SHA or version) over :latest so rollouts are
+          # deterministic and `kubectl rollout undo` actually means something.
+          image: ghcr.io/innovatech/nginx-web:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 80
           resources:
