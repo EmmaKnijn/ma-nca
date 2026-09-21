@@ -8,3 +8,6 @@ innovatech/lab/.terraform
 kubeconfig
 grafana-deployment-secret.yaml
 postgres-deployment-secret.yaml
+
+arc-runner-secret.yaml
+.chart-cache/
