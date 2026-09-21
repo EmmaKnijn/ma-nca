@@ -1,0 +1,21 @@
+githubConfigUrl: "https://github.com/myorg/myrepo"
+githubConfigSecret: pre-defined-secret
+runnerScaleSetName: "arc-runner-set"
+minRunners: 0
+maxRunners: 10
+containerMode:
+  type: "kubernetes"
+
+containerMode:
+  type: "kubernetes"
+  kubernetesModeWorkVolumeClaim:
+    accessModes: ["ReadWriteOnce"]
+    storageClassName: "longhorn"   # e.g. standard, gp2, local-path — check `kubectl get storageclass`
+    resources:
+      requests:
+        storage: 1Gi
+
+# Skip the live cluster lookup. required for `helm template` without a connected cluster
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-gha-rs-controller
