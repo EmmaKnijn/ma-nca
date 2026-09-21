@@ -9,7 +9,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
 spec:
   rules:
-    - host: tickets.innovatech.arpa
+    - host: innovatech.arpa
       http:
         paths:
           - path: /

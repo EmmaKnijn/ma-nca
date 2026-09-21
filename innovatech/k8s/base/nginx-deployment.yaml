@@ -34,7 +34,7 @@ spec:
           # ghcr.io/<github-org-or-user>/<repo>:<tag>. Prefer a pinned tag
           # (a commit SHA or version) over :latest so rollouts are
           # deterministic and `kubectl rollout undo` actually means something.
-          image: ghcr.io/innovatech/nginx-web:latest
+          image: ghcr.io/emmaknijn/ma-nca:main
           imagePullPolicy: Always
           ports:
             - containerPort: 80
