@@ -1,0 +1,165 @@
+# NetworkPolicies for the `monitoring` namespace.
+#
+# Default-deny baseline, then explicit allows for each real traffic flow:
+#   - ingress-nginx (hostNetwork, node IPs)  -> grafana:3000
+#   - ingress-nginx (hostNetwork, node IPs)  -> victoriametrics:8428
+#   - grafana                                -> victoriametrics:8428 (same ns)
+#   - grafana                                -> postgres-db:5432 (production ns)
+#   - victoriametrics                        -> grafana:3000 (scrape, same ns)
+#   - victoriametrics                        -> node-exporter:9100 (hostNetwork, node IPs)
+#   - victoriametrics                        -> ingress-nginx:10254 metrics (hostNetwork, node IPs)
+#   - every pod in this namespace            -> kube-system CoreDNS:53
+#
+# CAVEAT: node-exporter and ingress-nginx both run hostNetwork: true.
+# NetworkPolicy ingress/egress rules that reference them via ipBlock only
+# constrain the *subnet*, not real pod identity, and most CNIs don't enforce
+# policy against hostNetwork traffic reliably in the first place. Access to
+# node-exporter:9100 in particular should also be restricted at the host/
+# MikroTik firewall level - it exposes full node metrics with no auth.
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-grafana
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # ingress-nginx-controller, hostNetwork - see caveat in production policy
+        - ipBlock:
+            cidr: 192.168.106.0/24
+        - ipBlock:
+            cidr: 10.1.6.0/24
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana-egress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: grafana
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: victoriametrics
+      ports:
+        - protocol: TCP
+          port: 8428
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: production
+          podSelector:
+            matchLabels:
+              app: db
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-victoriametrics
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: victoriametrics
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: grafana
+        # ingress-nginx-controller, hostNetwork - see caveat above
+        - ipBlock:
+            cidr: 192.168.106.0/24
+        - ipBlock:
+            cidr: 10.1.6.0/24
+      ports:
+        - protocol: TCP
+          port: 8428
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-victoriametrics-egress
+  namespace: monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: victoriametrics
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - protocol: TCP
+          port: 3000
+    - to:
+        # node-exporter (:9100) and ingress-nginx metrics (:10254),
+        # both hostNetwork on the node subnet - see caveat above
+        - ipBlock:
+            cidr: 192.168.106.0/24
+      ports:
+        - protocol: TCP
+          port: 9100
+        - protocol: TCP
+          port: 10254

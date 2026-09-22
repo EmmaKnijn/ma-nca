@@ -1,0 +1,122 @@
+# NetworkPolicies for the `production` namespace.
+#
+# Default-deny baseline, then explicit allows for each real traffic flow:
+#   - ingress-nginx (hostNetwork, node IPs 192.168.106.0/24) -> nginx-web:80
+#   - grafana (monitoring ns)                                 -> postgres-db:5432
+#   - anyone on the node subnet                                -> bind9-dns:53
+#   - every pod in this namespace                              -> kube-system CoreDNS:53
+#
+# CAVEAT: ingress-nginx runs with hostNetwork: true, so its traffic leaves the
+# pod network entirely and arrives as if it came from the node's own IP. Most
+# CNIs (Calico/Cilium included, in their default modes) do NOT enforce
+# NetworkPolicy against hostNetwork-sourced traffic reliably - the ipBlock
+# rule below narrows *which node subnet* is allowed, but it is not a
+# substitute for restricting inbound access at the MikroTik firewall / node
+# host firewall. Treat this policy as defence-in-depth, not the sole control.
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-nginx-web
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # ingress-nginx-controller, hostNetwork - see caveat above
+        - ipBlock:
+            cidr: 192.168.106.0/24
+      ports:
+        - protocol: TCP
+          port: 80
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-postgres-from-grafana
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+          podSelector:
+            matchLabels:
+              app: grafana
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-bind9
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: bind9-dns
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Narrow this to your actual resolver/client subnet if bind9 only
+        # needs to be reachable from inside the org network, not the internet.
+        - ipBlock:
+            cidr: 192.168.106.0/24
+        - ipBlock:
+            cidr: 10.1.6.0/24
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
